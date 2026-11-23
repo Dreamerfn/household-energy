@@ -1,7 +1,7 @@
 """График суточного потребления электроэнергии за выбранные даты."""
 
 import argparse
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import matplotlib.dates as mdates
@@ -31,36 +31,58 @@ def choose_date(label, argument, first, last, default):
         print(message)
 
 
-def draw(days, output, show):
-    start, end = days.index[0].date(), days.index[-1].date()
-    fig, (energy, coverage) = plt.subplots(
-        2, 1, sharex=True, figsize=(10, 5.6), height_ratios=[3, 1], layout="constrained"
-    )
-    fig.suptitle(f"Потребление электроэнергии домохозяйством\n{start:%d.%m.%Y} — {end:%d.%m.%Y}")
-    energy.plot(days.index, days["full_day_kwh"], color="#176D79", lw=1.3,
-                marker="o", ms=3, label="Полные сутки")
-    partial = days.loc[days["valid_minutes"].between(1, 1439)]
-    energy.scatter(partial.index, partial["observed_kwh"], color="#BD541D", marker="^",
-                   s=35, label="Измерено за неполные сутки", zorder=3)
-    energy.set_ylabel("Расход, кВт·ч")
-    energy.set_ylim(bottom=0)
-    energy.legend(loc="upper right", frameon=False)
-    if days["observed_kwh"].isna().all():
-        energy.text(0.5, 0.45, "За выбранные даты показаний нет",
-                    transform=energy.transAxes, ha="center")
+def read_minutes(daily_path, start, end):
+    source = daily_path.with_name("minutes.csv")
+    if not source.exists():
+        source = daily_path.with_name("minutes.zip")
+    if not source.exists():
+        raise ValueError("Рядом с суточным CSV нужен minutes.csv или minutes.zip.")
+    first, stop = start.isoformat(), (end + timedelta(days=1)).isoformat()
+    selected = []
+    for chunk in pd.read_csv(source, usecols=["timestamp", "active_kw"], chunksize=100000):
+        stamp = chunk["timestamp"]
+        selected.append(chunk.loc[(stamp >= first) & (stamp < stop)])
+    rows = pd.concat(selected, ignore_index=True)
+    rows["timestamp"] = pd.to_datetime(rows["timestamp"])
+    return rows.set_index("timestamp")["active_kw"].asfreq("min")
 
-    coverage.bar(days.index, days["coverage_pct"], color="#587A9A", width=0.85)
-    coverage.set(ylim=(0, 105), yticks=[0, 50, 100], ylabel="Покрытие, %", xlabel="Дата")
-    margin = pd.Timedelta(hours=16)
-    coverage.set_xlim(days.index[0] - margin, days.index[-1] + margin)
-    if len(days) <= 8:
-        coverage.set_xticks(days.index)
-        coverage.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
-    else:
-        locator = mdates.AutoDateLocator(minticks=3, maxticks=8)
-        coverage.xaxis.set_major_locator(locator)
-        coverage.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m.%y"))
-    for axis in (energy, coverage):
+
+def draw(days, minutes, output, show):
+    start, end = days.index[0], days.index[-1]
+    fig, (power, energy) = plt.subplots(2, 1, figsize=(12, 6.5), height_ratios=[2, 1],
+                                        layout="constrained")
+    power.set_title(f"Потребление дома: {start:%d.%m.%Y} — {end:%d.%m.%Y}")
+    power.plot(minutes, color="#90AEC9", lw=0.55, alpha=0.7, label="Минутные измерения")
+    hours = minutes.resample("h")
+    mean_kw = hours.mean().where(hours.count().eq(60))
+    power.plot(mean_kw, color="#204E78", lw=1.7, marker=".", ms=2,
+               label="Средняя мощность за час")
+    power.set(ylabel="Активная мощность, кВт", ylim=(0, None),
+              xlim=(start, end + pd.Timedelta(days=1)))
+    power.legend(loc="upper right")
+    if minutes.count() == 0:
+        power.text(0.5, 0.45, "За выбранный период показаний нет",
+                   transform=power.transAxes, ha="center")
+
+    complete = days["full_day_kwh"].dropna()
+    bars = energy.bar(complete.index, complete, width=0.65, color="#248878")
+    if len(days) <= 21:
+        energy.bar_label(bars, fmt="%.1f", padding=2, fontsize=9)
+    if complete.empty:
+        energy.text(0.5, 0.45, "За выбранный период нет полных суток",
+                    transform=energy.transAxes, ha="center")
+    energy.margins(y=0.16)
+    margin = pd.Timedelta(hours=14)
+    energy.set(title="Суточное потребление (только полные сутки)", ylabel="Энергия, кВт·ч",
+               xlabel="Дата", ylim=(0, None), xlim=(start - margin, end + margin))
+    for axis in (power, energy):
+        if len(days) <= 10:
+            axis.xaxis.set_major_locator(mdates.DayLocator())
+            axis.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
+        else:
+            axis.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=3, maxticks=9))
+            axis.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m.%y"))
+        axis.set_axisbelow(True)
         axis.grid(axis="y", alpha=0.2)
         axis.spines[["top", "right"]].set_visible(False)
 
@@ -88,12 +110,13 @@ def main():
         start = choose_date("Начало", args.start, first, last, first)
         end = choose_date("Конец", args.end, start, last, last)
         days = daily.loc[str(start):str(end)]
+        minutes = read_minutes(args.data, start, end)
         output = ROOT / "plots" / f"energy_{start}_{end}.png"
         measured = days["observed_kwh"].sum(min_count=1)
         if pd.notna(measured):
             print(f"За минуты с показаниями измерено {measured:.3f} кВт·ч.")
         print(f"Полных суток {days['full_day_kwh'].count()} из {len(days)}.")
-        draw(days, output, show=not args.no_show)
+        draw(days, minutes, output, show=not args.no_show)
         print(f"График сохранён в {output}")
     except FileNotFoundError:
         parser.exit(1, f"Файл {args.data} не найден. Укажите --data или запустите prepare.py.\n")
