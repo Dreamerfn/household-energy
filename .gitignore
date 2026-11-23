@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+.mplconfig/
+data/raw/
+data/minutes.csv
+plots/

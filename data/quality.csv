@@ -1,0 +1,8 @@
+metric,count
+source_rows,2075259
+invalid_time_rows,0
+missing_input_cells,181853
+invalid_numeric_cells,0
+extra_duplicate_rows,0
+conflicting_duplicate_cells,0
+inconsistent_active_minutes,0
